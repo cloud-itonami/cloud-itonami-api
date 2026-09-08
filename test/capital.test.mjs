@@ -35,5 +35,19 @@ test('actual EVM deployment, signed deposits, bounded Bot spending, DeFi, repaym
   await action('recall',{amount:'220'});await provider.send('evm_setNextBlockTimestamp',[now+1201]);await provider.send('anvil_mine',[1]);await action('settle');await action('claim',{},lender,lenderPrincipal);
   const state=await snapshot(env,org,vault,lenderPrincipal);assert.equal(state.balances.distributed,'430000000');assert.equal(state.balances.cash,'0');assert.equal(state.balances.position,'0');assert.equal(await token.balanceOf(lender.address),430000000n);
   assert.equal(env.CAPITAL_DB.sqlite.prepare('SELECT count(*) AS n FROM capital_receipts').get().n,10);
+  env.CAPITAL_DB.sqlite.prepare('INSERT INTO public_funding_terms VALUES(?,?,?,?)').run(org,'yield-v1',JSON.stringify({chainId:8453,idleStrategy:'aave-v3',dailyLimitUSDC:'100',fundingPolicy:'yield-budget-v1',botShareBps:5000}),principal);
+  const yinput={...input,termsVersion:'yield-v1',policy:'yield-budget-v1',fundingDeadline:now+2400,maturity:now+3600};
+  await assert.rejects(plan(env,{...yinput,policy:'fixed-round-net-income-v1'},principal),e=>e.status===400);
+  const [yd]=await submit(await plan(env,yinput,principal),owner,principal),yv=yd.contract;
+  const ya=async(action,data={},signer=owner,who=principal)=>submit(await plan(env,{project:org,vault:yv,action,...data},who),signer,who);
+  await ya('deposit',{amount:'100'},lender,lenderPrincipal);
+  await provider.send('evm_setNextBlockTimestamp',[now+2401]);await provider.send('anvil_mine',[1]);await ya('start');await ya('setExecutor',{executor:owner.address,allowed:true});
+  await assert.rejects(ya('spend',{intent:keccak256(toUtf8Bytes('yield-spend')),recipient:vendor.address,amount:'1'}),e=>e.status===409);
+  await ya('allocate',{amount:'90'});await (await pool.yieldTo(yv,10000000)).wait();await ya('harvest');
+  await ya('spend',{intent:keccak256(toUtf8Bytes('yield-spend')),recipient:vendor.address,amount:'5'});
+  let ys=await snapshot(env,org,yv,lenderPrincipal);assert.equal(ys.balances.debt,'0');assert.equal(ys.balances.cash,'105000000');assert.equal(ys.balances.budgetCash,'0');assert.equal(ys.rounds.length,2);
+  await provider.send('evm_setNextBlockTimestamp',[now+3601]);await provider.send('anvil_mine',[1]);await ya('settle');await ya('claim',{},lender,lenderPrincipal);
+  ys=await snapshot(env,org,yv,lenderPrincipal);assert.equal(ys.balances.distributed,'105000000');
+
  }finally{globalThis.fetch=originalFetch;provider.destroy();process.kill();}
 });
