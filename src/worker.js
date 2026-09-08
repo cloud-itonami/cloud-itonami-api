@@ -1,8 +1,9 @@
-import {json,failure,snapshot,plan,confirm,readIntent,registerTerms} from './capital.js';
+import {fundingDirectory,json,failure,snapshot,plan,confirm,readIntent,registerTerms} from './capital.js';
 // Service-binding-only worker. Human sessions are verified by the existing ingress.
 export default {async fetch(request,env){try{
  const url=new URL(request.url);if(url.pathname!=='/capital')throw failure(404,'Not found');
  const principal=request.headers.get('x-itonami-principal');
+ if(request.method==='GET'&&url.searchParams.get('directory')==='1')return json(await fundingDirectory(env));
  if(request.method==='GET'&&url.searchParams.has('intent'))return json(await readIntent(env,url.searchParams.get('intent'),principal));
  if(request.method==='GET')return json(await snapshot(env,url.searchParams.get('project'),url.searchParams.get('vault'),principal));
  if(request.method!=='POST')throw failure(405,'Method not allowed');if(!principal)throw failure(401,'Verified session required');
