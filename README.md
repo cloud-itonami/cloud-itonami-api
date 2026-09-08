@@ -103,3 +103,11 @@ Worker deployment. Do not represent this version as audited or risk-free.
 Settlement recalls the entire Aave position in the same transaction, so accrued
 interest or donated receipt-token dust cannot leave a separate recall/settle gap.
 If Aave cannot supply that liquidity, settlement reverts and remains uncompleted.
+
+RPC reads use PublicNode Base with a separately chain-checked Base endpoint as
+fallback, short timeouts and a 30-second cooldown after transport failure.
+Contract errors and wrong-chain responses fail closed. Empty, uncreated rounds
+need no RPC request. Both defaults are shared public infrastructure; a dedicated
+HTTPS Base provider can replace them through Worker configuration as traffic
+grows. No funds or private keys are sent to an RPC provider by this API.
+PublicNode endpoint: https://base.publicnode.com/
