@@ -1,6 +1,7 @@
+import {safeDeployment,safeEnvelope,safeABI,safeExecutionSucceeded} from '../src/safe.js';
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import {spawn} from 'node:child_process';import {DatabaseSync} from 'node:sqlite';
-import {JsonRpcProvider,ContractFactory,Contract,keccak256,toUtf8Bytes} from 'ethers';
-import {network,units,matchesRuntime,plan,confirm,snapshot,fundingDirectory} from '../src/capital.js';
+import {JsonRpcProvider,ContractFactory,Contract,zeroPadValue,keccak256,toUtf8Bytes} from 'ethers';
+import {network,units,matchesRuntime,plan,confirm,snapshot,fundingDirectory,safeAccount} from '../src/capital.js';
 import artifact from '../src/vault-artifact.json' with {type:'json'};
 test('amounts use exact USDC integers; malformed and altered code fail',()=>{assert.equal(units('1.000001'),1000001n);for(const s of ['0','-1','1e6','1.0000001','NaN','1.'])assert.throws(()=>units(s));assert.equal(matchesRuntime(artifact.runtime),true);assert.equal(matchesRuntime('0x00'+artifact.runtime.slice(4)),false);});
 function database(){const sqlite=new DatabaseSync(':memory:');sqlite.exec('CREATE TABLE public_funding_terms(project TEXT,version TEXT,terms TEXT,owner_id TEXT)');sqlite.exec(fs.readFileSync('schema.sql','utf8'));
@@ -59,5 +60,48 @@ test('actual EVM deployment, signed deposits, bounded Bot spending, DeFi, repaym
   assert.equal(closed.pool.totals.outstanding,'0');assert.equal(closed.pool.totals.pooled,'0');
 
 
+  // Real, hash-pinned Safe runtime on the local EVM. No mainnet signing or funds.
+  const fixture=JSON.parse(fs.readFileSync('test/fixtures/safe-1.4.1.json'));
+  const safe='0x0000000000000000000000000000000000009999';
+  await provider.send('anvil_setCode',[safe,fixture.proxy]);
+  await provider.send('anvil_setCode',[safeDeployment.singleton,fixture.singleton]);
+  await provider.send('anvil_setStorageAt',[safe,zeroPadValue('0x00',32),zeroPadValue(safeDeployment.singleton,32)]);
+  const safeContract=new Contract(safe,['function setup(address[],uint256,address,bytes,address,address,uint256,address)'],owner);
+  const zero='0x0000000000000000000000000000000000000000';
+  await (await safeContract.setup([owner.address],1,zero,'0x',zero,zero,0,zero)).wait();
+  assert.equal((await safeAccount(env,safe,principal)).autonomousExecution,false);
+  await assert.rejects(safeAccount(env,safe,lenderPrincipal),e=>e.status===403);
+  const [sr]=await submit(await plan(env,{...input,fundingDeadline:now+4200,maturity:now+4800},principal),owner,principal);
+  const sv=sr.contract;
+  await (await token.mint(safe,10000000)).wait();
+  const sp=await plan(env,{project:org,vault:sv,action:'deposit',amount:'10',safe},principal);
+  assert.equal(sp.transaction.to,safe);assert.equal(sp.transaction.from,owner.address.toLowerCase());
+  const [sd]=await submit(sp,owner,principal);
+  assert.equal(sd.contract,sv);assert.equal((await snapshot(env,org,sv,principal,safe)).balances.position,'10000000');
+  assert.equal((await fundingDirectory(env,principal,safe)).items[org].lending,true);
+  assert.equal((await fundingDirectory(env,principal)).items[org].lending,false);
+  await submit(await plan(env,{project:org,vault:sv,action:'withdraw',amount:'10',safe},principal),owner,principal);
+  assert.equal(await token.balanceOf(safe),10000000n);
+  assert.equal((await fundingDirectory(env,principal,safe)).items[org].lending,false);
+
  }finally{globalThis.fetch=originalFetch;provider.destroy();process.kill();}
+});
+
+test('Safe envelope permits CALL only and verifies its inner execution event',()=>{
+ const safe='0x'+'1'.repeat(40),owner='0x'+'2'.repeat(40),to='0x'+'3'.repeat(40);
+ const t=safeEnvelope(safe,owner,{to,data:'0x12345678',value:'0x0'});
+ const d=safeABI.decodeFunctionData('execTransaction',t.data);assert.equal(d[3],0n);assert.equal(d[6],0n);assert.equal(d[9].slice(-2),'01');
+ assert.throws(()=>safeEnvelope(safe,owner,{to,data:'0x',value:'0x1'}));
+ const event=n=>({address:safe,...safeABI.encodeEventLog(safeABI.getEvent(n),['0x'+'0'.repeat(64),0])});
+ assert.equal(safeExecutionSucceeded({logs:[event('ExecutionSuccess')]},safe),true);
+ assert.equal(safeExecutionSucceeded({logs:[event('ExecutionFailure')]},safe),false);
+ assert.equal(safeExecutionSucceeded({logs:[]},safe),false);
+});
+
+test('pinned Safe runtime matches the official deployment record',()=>{
+ const official=JSON.parse(fs.readFileSync('node_modules/@safe-global/safe-deployments/src/assets/v1.4.1/safe_l2.json'));
+ assert.equal(official.deployments.canonical.codeHash,safeDeployment.singletonCodeHash);
+ assert.equal(official.networkAddresses['8453'],'canonical');
+ const fixture=JSON.parse(fs.readFileSync('test/fixtures/safe-1.4.1.json'));
+ assert.equal(keccak256(fixture.singleton),safeDeployment.singletonCodeHash);assert.equal(keccak256(fixture.proxy),safeDeployment.proxyCodeHash);
 });
