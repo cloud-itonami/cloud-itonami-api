@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS public_funding_terms(project TEXT NOT NULL,version TEXT NOT NULL,terms TEXT NOT NULL,owner_id TEXT NOT NULL,PRIMARY KEY(project,version));
+CREATE TABLE IF NOT EXISTS capital_rounds(project TEXT NOT NULL,vault TEXT NOT NULL UNIQUE,terms_version TEXT NOT NULL,settings TEXT NOT NULL,deploy_tx TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,PRIMARY KEY(project,vault));
+CREATE TABLE IF NOT EXISTS capital_intents(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,project TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS capital_receipts(chain_id INTEGER NOT NULL,tx_hash TEXT NOT NULL,intent_id TEXT NOT NULL UNIQUE,project TEXT NOT NULL,action TEXT NOT NULL,block_number INTEGER NOT NULL,block_hash TEXT NOT NULL,PRIMARY KEY(chain_id,tx_hash));

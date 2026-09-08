@@ -1,0 +1,1 @@
+{"name":"@cloud-itonami/api","version":"0.1.0","private":true,"type":"module","scripts":{"build":"forge build && node scripts/artifact.mjs","test":"forge test && node --test test/*.test.mjs","check":"wrangler deploy --dry-run"},"dependencies":{"ethers":"6.17.0"},"devDependencies":{"wrangler":"4.129.0"}}
