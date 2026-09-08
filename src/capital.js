@@ -19,10 +19,11 @@ const hash=x=>keccak256(toUtf8Bytes(typeof x==='string'?x:stringify(x)));
 const verifiedRPC=new Map(),unavailableRPC=new Map();
 async function rpcAt(url,method,params){
  const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),signal:AbortSignal.timeout(8000)});
- if(!response.ok)throw failure(503,'Chain unavailable');const result=await response.json();
+ if(!response.ok)throw failure(503,'upstream HTTP '+response.status);const result=await response.json();
  if(result.error)throw failure([429,-32005].includes(result.error.code)?503:502,'Chain call failed');if(result.result===undefined)throw failure(503,'Invalid chain response');return result.result;
 }
 export async function rpc(env,method,params){
+ const failures=[];
  const endpoints=[...new Set([env.BASE_RPC,env.BASE_RPC_FALLBACK].filter(Boolean))];
  if(!endpoints.length||endpoints.some(x=>!x.startsWith('https://')))throw failure(503,'Base RPC is not configured');
  for(const url of endpoints){
@@ -38,10 +39,11 @@ export async function rpc(env,method,params){
   }catch(error){
    // A contract revert or wrong-chain response is never turned into success by another provider.
    if(error.status===502||error.status===409)throw error;
+   failures.push(error.message);
    unavailableRPC.set(url,Date.now()+30000);verifiedRPC.delete(url);
   }
  }
- throw failure(503,'Base RPC temporarily unavailable; retry shortly');
+ throw failure(503,'Base RPC temporarily unavailable ('+method+': '+(failures.join('; ')||'retry cooldown')+'); retry shortly');
 }
 export async function chain(env){if(Number(await rpc(env,'eth_chainId',[]))!==network.chainId)throw failure(503,'Wrong RPC chain');}
 const call=async(env,to,name,args=[],block='latest',abi=vault)=>abi.decodeFunctionResult(name,await rpc(env,'eth_call',[{to,data:abi.encodeFunctionData(name,args)},block]))[0];
