@@ -1,3 +1,4 @@
+import {safeDeployment,safeABI,safeEnvelope,safeExecutionSucceeded} from './safe.js';
 import {Interface,ContractFactory,keccak256,toUtf8Bytes} from 'ethers';
 import artifact from './vault-artifact.json' with {type:'json'};
 import yieldArtifact from './yield-vault-artifact.json' with {type:'json'};
@@ -47,8 +48,9 @@ const db=env=>{if(!env.CAPITAL_DB)throw failure(503,'Capital journal unavailable
 export function wallet(principal){const match=/^did:pkh:eip155:(1|8453):(0x[a-fA-F0-9]{40})$/.exec(principal||'');if(!match)throw failure(403,'Use a verified EVM wallet for financial transactions');return address(match[2]);}
 async function terms(env,project,version){const row=await db(env).prepare('SELECT * FROM public_funding_terms WHERE project=? AND version=?').bind(project,version).first();if(!row)throw failure(404,'Registered terms not found');return row;}
 async function round(env,project,contract){const row=await db(env).prepare('SELECT * FROM capital_rounds WHERE project=? AND vault=?').bind(project,address(contract)).first();if(!row)throw failure(404,'Verified lending round not found');return row;}
-export async function snapshot(env,project,contract,principal){
+export async function snapshot(env,project,contract,principal,account=null){
  if(typeof project!=='string'||!/^[-a-zA-Z0-9_.]+\/[-a-zA-Z0-9_.]+$/.test(project)||project.length>201)throw failure(400,'Use org/repo');
+ const acting=account?(await safeAccount(env,account,principal)).address:null;
  const rows=(await db(env).prepare('SELECT project,vault,terms_version,created_at,settings FROM capital_rounds WHERE project=? ORDER BY created_at DESC').bind(project).all()).results;
  const selected=contract?rows.find(r=>r.vault===address(contract)):rows[0];if(contract&&!selected)throw failure(404,'Verified lending round not found');if(!selected)return {project,network,rounds:[],status:'no-vault',depositEnabled:false};
  await chain(env);
@@ -56,11 +58,28 @@ export async function snapshot(env,project,contract,principal){
  await Promise.all(['phase','principal','debt','repaid','businessIncome','writtenOff','settlementAssets','distributed','fundingDeadline','maturity','dailyLimit','cashReserve','controller','termsHash'].map(async name=>{result[name]=String(await call(env,to,name,[],block));}));
  if(JSON.parse(selected.settings).policy===YIELD_POLICY){for(const name of ['budget','botShareBps','retainedYield','harvested','budgetAllocated','budgetSpent'])result[name]=String(await call(env,to,name,[],block,yieldABI));result.budgetCash=String(await call(env,network.asset,'balanceOf',[result.budget],block,erc20));}
  result.cash=String(await call(env,network.asset,'balanceOf',[to],block,erc20));result.idleAssets=String(await call(env,network.aToken,'balanceOf',[to],block,erc20));
- if(principal){try{result.position=String(await call(env,to,'positions',[wallet(principal)],block));}catch(error){if(error.status!==403)throw error;}}
+ if(principal){try{result.position=String(await call(env,to,'positions',[acting||wallet(principal)],block));}catch(error){if(error.status!==403)throw error;}}
  return {project,network,rounds:rows.map(r=>({...r,settings:JSON.parse(r.settings)})),vault:to,termsVersion:selected.terms_version,settings:JSON.parse(selected.settings),asOfBlock:block,status:'verified-vault',balances:result};
 }
+export async function safeAccount(env,account,principal){
+ const a=address(account),owner=wallet(principal);await chain(env);
+ const block=await rpc(env,'eth_blockNumber',[]);
+ const proxy=await rpc(env,'eth_getCode',[a,block]),slot=await rpc(env,'eth_getStorageAt',[a,'0x0',block]);
+ if(keccak256(proxy)!==safeDeployment.proxyCodeHash||'0x'+slot.slice(-40).toLowerCase()!==safeDeployment.singleton||keccak256(await rpc(env,'eth_getCode',[safeDeployment.singleton,block]))!==safeDeployment.singletonCodeHash)throw failure(400,'Unverified Safe deployment on Base');
+ const owners=Array.from(await call(env,a,'getOwners',[],block,safeABI)).map(address);
+ const threshold=String(await call(env,a,'getThreshold',[],block,safeABI));
+ if(!owners.includes(owner))throw failure(403,'The signed-in wallet is not a current Safe owner');
+ if(threshold!=='1')throw failure(409,'This connection requires one Safe owner; multisig review must use Safe');
+ const version=await call(env,a,'VERSION',[],block,safeABI);
+ if(version!=='1.4.1')throw failure(409,'Unsupported Safe version');
+ const modules=safeABI.decodeFunctionResult('getModulesPaginated',await rpc(env,'eth_call',[{to:a,data:safeABI.encodeFunctionData('getModulesPaginated',['0x0000000000000000000000000000000000000001',20])},block]));
+ return {address:a,chainId:8453,owners,threshold,version,asOfBlock:block,modules:Array.from(modules[0]),
+  execution:'owner-wallet-signature',autonomousExecution:false};
+}
 export async function plan(env,input,principal){
- await chain(env);const from=wallet(principal),project=input.project;
+ await chain(env);const owner=wallet(principal),project=input.project;
+ const safe=input.safe?await safeAccount(env,input.safe,principal):null,from=safe?.address||owner;
+ if(safe&&input.action==='deploy')throw failure(400,'Create the round with the owner wallet, then explicitly grant the Safe executor permission');
  if(typeof project!=='string'||!/^[-a-zA-Z0-9_.]+\/[-a-zA-Z0-9_.]+$/.test(project)||project.length>201)throw failure(400,'Use org/repo');
  const usage=await db(env).prepare('SELECT count(*) AS n FROM capital_intents WHERE owner_id=? AND created_at>?').bind(principal,Date.now()-86400000).first();if(usage.n>=200)throw failure(429,'Daily transaction preparation limit reached');
  const action=input.action,id=crypto.randomUUID();let tx,approval=null,metadata={};
@@ -97,12 +116,19 @@ export async function plan(env,input,principal){
    if(allowance<amount)approval={from,to:network.asset,data:erc20.encodeFunctionData('approve',[to,amount]),value:'0x0',chainId:hex(network.chainId)};
   }
  }
- const transaction={from,...tx,value:'0x0',chainId:hex(network.chainId)};
+ let transaction={from,...tx,value:'0x0',chainId:hex(network.chainId)};
  if(action!=='deploy'&&!approval){try{await rpc(env,'eth_call',[{from,to:tx.to,data:tx.data,value:'0x0'},'latest']);}catch{throw failure(409,'Current balance, authority or round conditions do not permit this action');}}
  if(approval){const phase=Number(await call(env,tx.to,'phase'));if((action==='deposit'&&phase!==0)||(action==='repay'&&phase!==1))throw failure(409,'This round no longer accepts this action');}
 
+ if(safe){
+  metadata.safe=safe.address;metadata.capitalTransaction=transaction;
+  transaction=safeEnvelope(safe.address,owner,transaction);
+  if(approval)approval=safeEnvelope(safe.address,owner,approval);
+  else {try{const output=await rpc(env,'eth_call',[transaction,'latest']);if(!safeABI.decodeFunctionResult('execTransaction',output)[0])throw Error();}catch{throw failure(409,'Safe execution did not pass simulation');}}
+ }
  // Persist the exact transaction before the wallet sees it. No request can choose arbitrary calldata.
  const review=action==='deploy'?{fundingModel:input.policy,botShareBps:metadata.settings.botShareBps??null,controller:from,asset:'Base USDC',fundingCap:input.fundingCap,cashReserve:input.cashReserve,fundingCloses:new Date(input.fundingDeadline*1000).toISOString(),maturity:new Date(input.maturity*1000).toISOString(),payees:metadata.settings.recipients.join(', '),termsHash:metadata.termsHash,policy:metadata.settings.policy}:{vault:transaction.to,...Object.fromEntries(['amount','principal','income','recipient','intent','executor','allowed'].filter(k=>input[k]!==undefined).map(k=>[k,input[k]]))};
+ if(safe){review.safe=safe.address;review.signingOwner=owner;review.autonomousExecution=false;}
  const record={transaction,approval,metadata,review};await db(env).prepare('INSERT INTO capital_intents(id,owner_id,project,action,payload,created_at) VALUES(?,?,?,?,?,?)').bind(id,principal,project,action,stringify(record),Date.now()).run();
  return {id,project,action,network,transaction,approval,metadata,review,warning:'Review the exact terms, chain, recipient and amount in your wallet. No server signer is used.'};
 }
@@ -118,6 +144,7 @@ export async function confirm(env,input,principal){
  const block=await rpc(env,'eth_getBlockByNumber',[receipt.blockNumber,false]);if(block?.hash!==receipt.blockHash)throw failure(409,'Chain reorganization; recheck receipt');
  const actual=await rpc(env,'eth_getTransactionByHash',[input.transactionHash]),expected=JSON.parse(intent.payload);
  if(!actual||address(actual.from)!==address(expected.transaction.from)||(actual.to?.toLowerCase()||null)!==(expected.transaction.to?.toLowerCase()||null)||actual.input.toLowerCase()!==expected.transaction.data.toLowerCase()||BigInt(actual.value)!==0n)throw failure(409,'Transaction does not match the prepared action');
+ if(expected.metadata.safe&&!safeExecutionSucceeded(receipt,expected.metadata.safe))throw failure(409,'Safe inner transaction did not succeed');
  const transactionHash=input.transactionHash.toLowerCase(),stmts=[];
  if(intent.action==='deploy'){
   const contract=address(receipt.contractAddress),code=await rpc(env,'eth_getCode',[contract,receipt.blockNumber]);
@@ -128,7 +155,7 @@ export async function confirm(env,input,principal){
  const record={chain_id:network.chainId,tx_hash:transactionHash,intent_id:intent.id,project:intent.project,action:intent.action,block_number:Number(BigInt(receipt.blockNumber)),block_hash:receipt.blockHash};
  stmts.push(db(env).prepare('INSERT INTO capital_receipts(chain_id,tx_hash,intent_id,project,action,block_number,block_hash) VALUES(?,?,?,?,?,?,?)').bind(...Object.values(record)));
  try{await db(env).batch(stmts);}catch(error){const won=await db(env).prepare('SELECT * FROM capital_receipts WHERE intent_id=?').bind(intent.id).first();if(won?.tx_hash===transactionHash)return {status:'confirmed',receipt:won};throw failure(409,'Transaction was already attributed or journal conflict');}
- return {status:'confirmed',receipt:record,contract:receipt.contractAddress||expected.transaction.to};
+ return {status:'confirmed',receipt:record,contract:receipt.contractAddress||expected.metadata.capitalTransaction?.to||expected.transaction.to};
 }
 export function matchesRuntime(code,policy='fixed-round-net-income-v1'){
  const artifact=deploymentArtifact(policy);
@@ -164,10 +191,11 @@ export function poolSummary(rounds) {
  return {status:known.length===rounds.length?'complete':'partial',verifiedRounds:known.length,totalRounds:rounds.length,
   totals:known.length===rounds.length?sums:null,verifiedSubtotal:sums};
 }
-export async function fundingDirectory(env,principal=null) {
+export async function fundingDirectory(env,principal=null,account=null) {
  const rows=(await db(env).prepare('SELECT project,vault,settings FROM capital_rounds ORDER BY created_at DESC').all()).results;
  const items={},all=[];let block=null,lender=null;
- if(principal){try{lender=wallet(principal);}catch{}}
+ if(account)lender=(await safeAccount(env,account,principal)).address;
+ else if(principal){try{lender=wallet(principal);}catch{}}
  if(rows.length){try{await chain(env);const latest=BigInt(await rpc(env,'eth_blockNumber',[]));block=hex(latest>=11n?latest-11n:0n);}catch{}}
  for(const row of rows){
   let availability;
