@@ -16,22 +16,44 @@ export function units(x){if(typeof x!=='string'||!/^\d{1,12}(\.\d{1,6})?$/.test(
 const hex=x=>'0x'+BigInt(x).toString(16);
 const stringify=x=>JSON.stringify(x,(_,v)=>typeof v==='bigint'?v.toString():v);
 const hash=x=>keccak256(toUtf8Bytes(typeof x==='string'?x:stringify(x)));
-const verifiedRPC=new Map(),unavailableRPC=new Map();
-async function rpcAt(url,method,params){
+const verifiedRPC=new Map(),unavailableRPC=new Map(),rpcQueues=new Map(),rpcPending=new Map(),verifyingRPC=new Map();
+const readMethods=new Set(['eth_chainId','eth_blockNumber','eth_call','eth_getCode','eth_getStorageAt','eth_getTransactionByHash','eth_getTransactionReceipt','eth_getBlockByNumber']);
+function verifyRPC(url){
+ if((verifiedRPC.get(url)||0)>Date.now())return Promise.resolve();
+ if(verifyingRPC.has(url))return verifyingRPC.get(url);
+ const task=(async()=>{if(Number(await rpcAt(url,'eth_chainId',[]))!==network.chainId)throw failure(409,'Wrong RPC chain');verifiedRPC.set(url,Date.now()+30000);})();
+ verifyingRPC.set(url,task);task.finally(()=>verifyingRPC.delete(url)).catch(()=>{});return task;
+}
+function rpcAt(url,method,params){
+ const task=(rpcQueues.get(url)||Promise.resolve()).then(()=>rpcFetch(url,method,params));
+ const tail=task.catch(()=>{});rpcQueues.set(url,tail);tail.finally(()=>{if(rpcQueues.get(url)===tail)rpcQueues.delete(url)});return task;
+}
+async function rpcFetch(url,method,params){
+ if((unavailableRPC.get(url)||0)>Date.now())throw failure(503,'RPC retry cooldown');
  const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),signal:AbortSignal.timeout(8000)});
- if(!response.ok)throw failure(503,'upstream HTTP '+response.status);const result=await response.json();
+ if(!response.ok){
+  const retry=response.headers.get('retry-after');const seconds=retry && /^\d+$/.test(retry)?Number(retry):retry?Math.max(0,(Date.parse(retry)-Date.now())/1000):30;
+  unavailableRPC.set(url,Date.now()+Math.min(120000,Math.max(30000,(Number.isFinite(seconds)?seconds:30)*1000)));
+  throw failure(503,'upstream HTTP '+response.status);
+ }const result=await response.json();
  if(result.error)throw failure([429,-32005].includes(result.error.code)?503:502,'Chain call failed');if(result.result===undefined)throw failure(503,'Invalid chain response');return result.result;
 }
-export async function rpc(env,method,params){
+export function rpc(env,method,params){
+ if(!readMethods.has(method))return Promise.reject(failure(400,'Only read-only RPC is supported'));
+ const key=JSON.stringify([env.BASE_RPC,env.BASE_RPC_FALLBACK,env.BASE_RPC_SECONDARY,method,params]);
+ if(rpcPending.has(key))return rpcPending.get(key);
+ const task=rpcRead(env,method,params);rpcPending.set(key,task);
+ task.finally(()=>rpcPending.delete(key)).catch(()=>{});return task;
+}
+async function rpcRead(env,method,params){
  const failures=[];
- const endpoints=[...new Set([env.BASE_RPC,env.BASE_RPC_FALLBACK].filter(Boolean))];
+ const endpoints=[...new Set([env.BASE_RPC,env.BASE_RPC_FALLBACK,env.BASE_RPC_SECONDARY].filter(Boolean))];
  if(!endpoints.length||endpoints.some(x=>!x.startsWith('https://')))throw failure(503,'Base RPC is not configured');
  for(const url of endpoints){
   if((unavailableRPC.get(url)||0)>Date.now())continue;
   try{
    if(method!=='eth_chainId'&&(verifiedRPC.get(url)||0)<Date.now()){
-    if(Number(await rpcAt(url,'eth_chainId',[]))!==network.chainId)throw failure(409,'Wrong RPC chain');
-    verifiedRPC.set(url,Date.now()+30000);
+    await verifyRPC(url);
    }
    const result=await rpcAt(url,method,params);
    if(method==='eth_chainId'){if(Number(result)!==network.chainId)throw failure(409,'Wrong RPC chain');verifiedRPC.set(url,Date.now()+30000);}
@@ -40,7 +62,7 @@ export async function rpc(env,method,params){
    // A contract revert or wrong-chain response is never turned into success by another provider.
    if(error.status===502||error.status===409)throw error;
    failures.push(error.message);
-   unavailableRPC.set(url,Date.now()+30000);verifiedRPC.delete(url);
+   unavailableRPC.set(url,Math.max(unavailableRPC.get(url)||0,Date.now()+30000));verifiedRPC.delete(url);
   }
  }
  throw failure(503,'Base RPC temporarily unavailable ('+method+': '+(failures.join('; ')||'retry cooldown')+'); retry shortly');
