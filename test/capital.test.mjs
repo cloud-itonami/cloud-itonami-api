@@ -1,10 +1,10 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import {spawn} from 'node:child_process';import {DatabaseSync} from 'node:sqlite';
 import {JsonRpcProvider,ContractFactory,Contract,keccak256,toUtf8Bytes} from 'ethers';
-import {network,units,matchesRuntime,plan,confirm,snapshot} from '../src/capital.js';
+import {network,units,matchesRuntime,plan,confirm,snapshot,fundingDirectory} from '../src/capital.js';
 import artifact from '../src/vault-artifact.json' with {type:'json'};
 test('amounts use exact USDC integers; malformed and altered code fail',()=>{assert.equal(units('1.000001'),1000001n);for(const s of ['0','-1','1e6','1.0000001','NaN','1.'])assert.throws(()=>units(s));assert.equal(matchesRuntime(artifact.runtime),true);assert.equal(matchesRuntime('0x00'+artifact.runtime.slice(4)),false);});
 function database(){const sqlite=new DatabaseSync(':memory:');sqlite.exec('CREATE TABLE public_funding_terms(project TEXT,version TEXT,terms TEXT,owner_id TEXT)');sqlite.exec(fs.readFileSync('schema.sql','utf8'));
- const db={sqlite,prepare(sql){return {bind(...args){return {first:async()=>sqlite.prepare(sql).get(...args)||null,all:async()=>({results:sqlite.prepare(sql).all(...args)}),run:async()=>sqlite.prepare(sql).run(...args)};}};},async batch(stmts){sqlite.exec('BEGIN');try{for(const s of stmts)await s.run();sqlite.exec('COMMIT');}catch(e){sqlite.exec('ROLLBACK');throw e;}}};return db;}
+ const db={sqlite,prepare(sql){return {all:async()=>({results:sqlite.prepare(sql).all()}),bind(...args){return {first:async()=>sqlite.prepare(sql).get(...args)||null,all:async()=>({results:sqlite.prepare(sql).all(...args)}),run:async()=>sqlite.prepare(sql).run(...args)};}};},async batch(stmts){sqlite.exec('BEGIN');try{for(const s of stmts)await s.run();sqlite.exec('COMMIT');}catch(e){sqlite.exec('ROLLBACK');throw e;}}};return db;}
 test('actual EVM deployment, signed deposits, bounded Bot spending, DeFi, repayment and distribution are journaled once',async()=>{
  const process=spawn('anvil',['--port','18547','--chain-id','8453','--silent'],{stdio:'ignore'});const provider=new JsonRpcProvider('http://127.0.0.1:18547',8453,{staticNetwork:true,cacheTimeout:-1});provider.pollingInterval=50;
  const originalFetch=globalThis.fetch;let env;
@@ -28,6 +28,13 @@ test('actual EVM deployment, signed deposits, bounded Bot spending, DeFi, repaym
   const [receipt,tx]=await action('deposit',{amount:'400'},lender,lenderPrincipal);
   const duplicate=await confirm(env,{id:receipt.receipt.intent_id,transactionHash:tx},lenderPrincipal);assert.equal(duplicate.status,'confirmed');
   await assert.rejects(confirm(env,{id:receipt.receipt.intent_id,transactionHash:tx},principal),e=>e.status===404);
+  // The directory reads one confirmed block and never exposes another wallet's position.
+  const portfolio=await fundingDirectory(env,lenderPrincipal);
+  assert.equal(portfolio.items[org].position,'400000000');assert.equal(portfolio.items[org].lending,true);
+  assert.equal(portfolio.pool.totals.pooled,'400000000');
+  const publicView=await fundingDirectory(env);assert.equal(publicView.items[org].position,null);
+  assert.equal(publicView.items[org].rounds[0].balances.position,undefined);
+  assert.equal((await fundingDirectory(env,principal)).items[org].lending,false);
   await provider.send('evm_setNextBlockTimestamp',[now+601]);await provider.send('anvil_mine',[1]);await action('start');await action('setExecutor',{executor:owner.address,allowed:true});
   await action('allocate',{amount:'200'});await (await pool.yieldTo(vault,20000000)).wait();
   await action('spend',{intent:keccak256(toUtf8Bytes('invoice-1')),recipient:vendor.address,amount:'100'});
@@ -48,6 +55,9 @@ test('actual EVM deployment, signed deposits, bounded Bot spending, DeFi, repaym
   let ys=await snapshot(env,org,yv,lenderPrincipal);assert.equal(ys.balances.debt,'0');assert.equal(ys.balances.cash,'105000000');assert.equal(ys.balances.budgetCash,'0');assert.equal(ys.rounds.length,2);
   await provider.send('evm_setNextBlockTimestamp',[now+3601]);await provider.send('anvil_mine',[1]);await ya('settle');await ya('claim',{},lender,lenderPrincipal);
   ys=await snapshot(env,org,yv,lenderPrincipal);assert.equal(ys.balances.distributed,'105000000');
+  const closed=await fundingDirectory(env,lenderPrincipal);assert.equal(closed.items[org].lending,false);
+  assert.equal(closed.pool.totals.outstanding,'0');assert.equal(closed.pool.totals.pooled,'0');
+
 
  }finally{globalThis.fetch=originalFetch;provider.destroy();process.kill();}
 });

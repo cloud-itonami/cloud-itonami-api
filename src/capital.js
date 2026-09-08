@@ -151,25 +151,51 @@ export async function registerTerms(env,input,principal){
  await db(env).prepare('INSERT INTO public_funding_terms(project,version,terms,owner_id) VALUES(?,?,?,?)').bind(input.project,input.version,encoded,principal).run();return {status:'registered'};
 }
 
-// Public funding availability only; no positions, owners or intents are exposed.
+// Public availability; owner positions are attached only for a verified ingress principal.
 export function fundingAvailability(phase, deadline, principal, cap, now) {
  const accepting=String(phase)==='0' && BigInt(deadline)>BigInt(now) && BigInt(principal)<BigInt(cap);
  return {status:accepting?'accepting':'not-accepting',depositEnabled:accepting};
 }
-export async function fundingDirectory(env) {
+// Amounts remain integer USDC base units; never sum money with floating point.
+export function poolSummary(rounds) {
+ const keys=['pooled','cash','idleAssets','budgetCash','outstanding','debt','distributed'];
+ const known=rounds.filter(r=>r.balances);
+ const sums=Object.fromEntries(keys.map(k=>[k,known.reduce((sum,r)=>sum+BigInt(r.balances[k]||'0'),0n).toString()]));
+ return {status:known.length===rounds.length?'complete':'partial',verifiedRounds:known.length,totalRounds:rounds.length,
+  totals:known.length===rounds.length?sums:null,verifiedSubtotal:sums};
+}
+export async function fundingDirectory(env,principal=null) {
  const rows=(await db(env).prepare('SELECT project,vault,settings FROM capital_rounds ORDER BY created_at DESC').all()).results;
- const items={};
+ const items={},all=[];let block=null,lender=null;
+ if(principal){try{lender=wallet(principal);}catch{}}
+ if(rows.length){try{await chain(env);const latest=BigInt(await rpc(env,'eth_blockNumber',[]));block=hex(latest>=11n?latest-11n:0n);}catch{}}
  for(const row of rows){
   let availability;
   try {
-   await chain(env);
-   const block=await rpc(env,'eth_blockNumber',[]);
-   const [phase,deadline,principal,cap]=await Promise.all(['phase','fundingDeadline','principal','fundingCap'].map(name=>call(env,row.vault,name,[],block)));
-   availability={...fundingAvailability(phase,deadline,principal,cap,Math.floor(Date.now()/1000)),asOfBlock:block};
+   if(!block)throw Error('Chain unavailable');
+   const fields=['phase','fundingDeadline','principal','fundingCap','claimedPrincipal','debt','distributed'];
+   const values=await Promise.all(fields.map(name=>call(env,row.vault,name,[],block)));
+   const b=Object.fromEntries(fields.map((name,i)=>[name,String(values[i])]));
+   b.cash=String(await call(env,network.asset,'balanceOf',[row.vault],block,erc20));
+   b.idleAssets=String(await call(env,network.aToken,'balanceOf',[row.vault],block,erc20));
+   b.budgetCash='0';
+   if(JSON.parse(row.settings).policy===YIELD_POLICY){
+    b.botWallet=String(await call(env,row.vault,'budget',[],block,yieldABI));
+    b.budgetCash=String(await call(env,network.asset,'balanceOf',[b.botWallet],block,erc20));
+   }
+   b.pooled=String(BigInt(b.cash)+BigInt(b.idleAssets)+BigInt(b.budgetCash));
+   b.outstanding=String(BigInt(b.principal)-BigInt(b.claimedPrincipal));
+   if(lender)b.position=String(await call(env,row.vault,'positions',[lender],block));
+   availability={...fundingAvailability(b.phase,b.fundingDeadline,b.principal,b.fundingCap,Math.floor(Date.now()/1000)),asOfBlock:block,balances:b};
   } catch {availability={status:'unknown',depositEnabled:false};}
-  const rounds=[...(items[row.project]?.rounds||[]),{vault:row.vault,policy:JSON.parse(row.settings).policy,...availability}];
+  const r={vault:row.vault,policy:JSON.parse(row.settings).policy,...availability};all.push(r);
+  const rounds=[...(items[row.project]?.rounds||[]),r];
   const status=rounds.some(r=>r.status==='accepting')?'accepting':rounds.some(r=>r.status==='unknown')?'unknown':'not-accepting';
-  items[row.project]={status,depositEnabled:status==='accepting',rounds};
+  const complete=rounds.every(r=>r.balances);
+  const position=lender&&complete?rounds.reduce((n,r)=>n+BigInt(r.balances.position),0n).toString():null;
+  items[row.project]={status,depositEnabled:status==='accepting',rounds,pool:poolSummary(rounds),position,
+   lending:position!==null?BigInt(position)>0n:null,
+   funded:complete?rounds.some(r=>BigInt(r.balances.outstanding)>0n):null};
  }
- return {items,checkedAt:new Date().toISOString()};
+ return {items,pool:poolSummary(all),personalized:!!lender,asOfBlock:block,checkedAt:new Date().toISOString()};
 }
