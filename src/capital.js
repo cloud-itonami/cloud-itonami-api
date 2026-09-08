@@ -10,10 +10,32 @@ export function units(x){if(typeof x!=='string'||!/^\d{1,12}(\.\d{1,6})?$/.test(
 const hex=x=>'0x'+BigInt(x).toString(16);
 const stringify=x=>JSON.stringify(x,(_,v)=>typeof v==='bigint'?v.toString():v);
 const hash=x=>keccak256(toUtf8Bytes(typeof x==='string'?x:stringify(x)));
+const verifiedRPC=new Map(),unavailableRPC=new Map();
+async function rpcAt(url,method,params){
+ const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),signal:AbortSignal.timeout(8000)});
+ if(!response.ok)throw failure(503,'Chain unavailable');const result=await response.json();
+ if(result.error)throw failure([429,-32005].includes(result.error.code)?503:502,'Chain call failed');if(result.result===undefined)throw failure(503,'Invalid chain response');return result.result;
+}
 export async function rpc(env,method,params){
- if(!env.BASE_RPC||!env.BASE_RPC.startsWith('https://'))throw failure(503,'Base RPC is not configured');
- const response=await fetch(env.BASE_RPC,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),signal:AbortSignal.timeout(12000)});
- if(!response.ok)throw failure(503,'Chain unavailable');const result=await response.json();if(result.error||result.result===undefined)throw failure(502,'Chain call failed');return result.result;
+ const endpoints=[...new Set([env.BASE_RPC,env.BASE_RPC_FALLBACK].filter(Boolean))];
+ if(!endpoints.length||endpoints.some(x=>!x.startsWith('https://')))throw failure(503,'Base RPC is not configured');
+ for(const url of endpoints){
+  if((unavailableRPC.get(url)||0)>Date.now())continue;
+  try{
+   if(method!=='eth_chainId'&&(verifiedRPC.get(url)||0)<Date.now()){
+    if(Number(await rpcAt(url,'eth_chainId',[]))!==network.chainId)throw failure(409,'Wrong RPC chain');
+    verifiedRPC.set(url,Date.now()+30000);
+   }
+   const result=await rpcAt(url,method,params);
+   if(method==='eth_chainId'){if(Number(result)!==network.chainId)throw failure(409,'Wrong RPC chain');verifiedRPC.set(url,Date.now()+30000);}
+   return result;
+  }catch(error){
+   // A contract revert or wrong-chain response is never turned into success by another provider.
+   if(error.status===502||error.status===409)throw error;
+   unavailableRPC.set(url,Date.now()+30000);verifiedRPC.delete(url);
+  }
+ }
+ throw failure(503,'Base RPC temporarily unavailable; retry shortly');
 }
 export async function chain(env){if(Number(await rpc(env,'eth_chainId',[]))!==network.chainId)throw failure(503,'Wrong RPC chain');}
 const call=async(env,to,name,args=[],block='latest',abi=vault)=>abi.decodeFunctionResult(name,await rpc(env,'eth_call',[{to,data:abi.encodeFunctionData(name,args)},block]))[0];
@@ -23,9 +45,9 @@ async function terms(env,project,version){const row=await db(env).prepare('SELEC
 async function round(env,project,contract){const row=await db(env).prepare('SELECT * FROM capital_rounds WHERE project=? AND vault=?').bind(project,address(contract)).first();if(!row)throw failure(404,'Verified lending round not found');return row;}
 export async function snapshot(env,project,contract,principal){
  if(typeof project!=='string'||!/^[-a-zA-Z0-9_.]+\/[-a-zA-Z0-9_.]+$/.test(project)||project.length>201)throw failure(400,'Use org/repo');
- await chain(env);
  const rows=(await db(env).prepare('SELECT project,vault,terms_version,created_at,settings FROM capital_rounds WHERE project=? ORDER BY created_at DESC').bind(project).all()).results;
- const selected=contract?rows.find(r=>r.vault===address(contract)):rows[0];if(!selected)return {project,network,rounds:[],status:'no-vault',depositEnabled:false};
+ const selected=contract?rows.find(r=>r.vault===address(contract)):rows[0];if(contract&&!selected)throw failure(404,'Verified lending round not found');if(!selected)return {project,network,rounds:[],status:'no-vault',depositEnabled:false};
+ await chain(env);
  const block=await rpc(env,'eth_blockNumber',[]),to=selected.vault,result={};
  await Promise.all(['phase','principal','debt','repaid','businessIncome','writtenOff','settlementAssets','distributed','fundingDeadline','maturity','dailyLimit','cashReserve','controller','termsHash'].map(async name=>{result[name]=String(await call(env,to,name,[],block));}));
  result.cash=String(await call(env,network.asset,'balanceOf',[to],block,erc20));result.idleAssets=String(await call(env,network.aToken,'balanceOf',[to],block,erc20));

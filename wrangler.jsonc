@@ -1,1 +1,18 @@
-{"name":"cloud-itonami-api","main":"src/worker.js","compatibility_date":"2026-09-08","workers_dev":false,"preview_urls":false,"vars":{"BASE_RPC":"https://mainnet.base.org"},"d1_databases":[{"binding":"CAPITAL_DB","database_name":"cloud-itonami-capital","database_id":"b999f666-24dc-4a64-ab98-500873565e30"}]}
+{
+  "name": "cloud-itonami-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-08",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "BASE_RPC": "https://base-rpc.publicnode.com",
+    "BASE_RPC_FALLBACK": "https://mainnet.base.org"
+  },
+  "d1_databases": [
+    {
+      "binding": "CAPITAL_DB",
+      "database_name": "cloud-itonami-capital",
+      "database_id": "b999f666-24dc-4a64-ab98-500873565e30"
+    }
+  ]
+}
