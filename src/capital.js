@@ -1,5 +1,9 @@
 import {Interface,ContractFactory,keccak256,toUtf8Bytes} from 'ethers';
 import artifact from './vault-artifact.json' with {type:'json'};
+import yieldArtifact from './yield-vault-artifact.json' with {type:'json'};
+export const YIELD_POLICY='yield-budget-v1';
+const yieldABI=new Interface(yieldArtifact.abi);
+export function deploymentArtifact(policy){if(policy===YIELD_POLICY)return yieldArtifact;if(policy==='fixed-round-net-income-v1')return artifact;throw failure(400,'Unsupported funding policy');}
 export const network={chainId:8453,asset:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',pool:'0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',aToken:'0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB',confirmations:12};
 export const vault=new Interface(artifact.abi);
 const erc20=new Interface(['function allowance(address,address) view returns(uint256)','function approve(address,uint256) returns(bool)','function balanceOf(address) view returns(uint256)']);
@@ -50,6 +54,7 @@ export async function snapshot(env,project,contract,principal){
  await chain(env);
  const block=await rpc(env,'eth_blockNumber',[]),to=selected.vault,result={};
  await Promise.all(['phase','principal','debt','repaid','businessIncome','writtenOff','settlementAssets','distributed','fundingDeadline','maturity','dailyLimit','cashReserve','controller','termsHash'].map(async name=>{result[name]=String(await call(env,to,name,[],block));}));
+ if(JSON.parse(selected.settings).policy===YIELD_POLICY){for(const name of ['budget','botShareBps','retainedYield','harvested','budgetAllocated','budgetSpent'])result[name]=String(await call(env,to,name,[],block,yieldABI));result.budgetCash=String(await call(env,network.asset,'balanceOf',[result.budget],block,erc20));}
  result.cash=String(await call(env,network.asset,'balanceOf',[to],block,erc20));result.idleAssets=String(await call(env,network.aToken,'balanceOf',[to],block,erc20));
  if(principal){try{result.position=String(await call(env,to,'positions',[wallet(principal)],block));}catch(error){if(error.status!==403)throw error;}}
  return {project,network,rounds:rows.map(r=>({...r,settings:JSON.parse(r.settings)})),vault:to,termsVersion:selected.terms_version,settings:JSON.parse(selected.settings),asOfBlock:block,status:'verified-vault',balances:result};
@@ -62,16 +67,19 @@ export async function plan(env,input,principal){
  if(action==='deploy'){
   const row=await terms(env,project,input.termsVersion);if(row.owner_id!==principal)throw failure(403,'Only the registering organization wallet can create its lending round');
   const declared=JSON.parse(row.terms);if(declared.chainId!==8453||declared.idleStrategy!=='aave-v3')throw failure(400,'This release supports Base USDC and Aave V3');
-  if(input.policy!=='fixed-round-net-income-v1')throw failure(400,'Accept the fixed-round distribution and default policy');
+  const selectedArtifact=deploymentArtifact(input.policy);
+  if(input.policy!==(declared.fundingPolicy||'fixed-round-net-income-v1'))throw failure(400,'Register terms for the selected funding model');
+  const yieldMode=input.policy===YIELD_POLICY;
+  if(yieldMode&&(!Number.isInteger(declared.botShareBps)||declared.botShareBps<1||declared.botShareBps>10000))throw failure(400,'Register Bot yield share from 1 to 10000 basis points');
   const now=Math.floor(Date.now()/1000),end=input.fundingDeadline,maturity=input.maturity;
   if(!Number.isSafeInteger(end)||!Number.isSafeInteger(maturity)||end<now+300||maturity<=end||maturity>now+365*86400)throw failure(400,'Use future funding and repayment deadlines within one year');
   const cap=units(input.fundingCap),daily=units(declared.dailyLimitUSDC),reserve=input.cashReserve==='0'?0n:units(input.cashReserve);
   if(reserve>cap||!Array.isArray(input.recipients)||!input.recipients.length||input.recipients.length>32)throw failure(400,'Specify a cash reserve and 1–32 approved payees');
   const recipients=[...new Set(input.recipients.map(address))];
-  const settings={policy:input.policy,project,termsVersion:row.version,registeredTerms:declared,chainId:8453,asset:network.asset,pool:network.pool,aToken:network.aToken,controller:from,fundingDeadline:end,maturity,dailyLimit:daily.toString(),fundingCap:cap.toString(),cashReserve:reserve.toString(),recipients,graceSeconds:604800,lenderNetIncomeBps:10000};
+  const settings={policy:input.policy,...(yieldMode?{botShareBps:declared.botShareBps}:{}),project,termsVersion:row.version,registeredTerms:declared,chainId:8453,asset:network.asset,pool:network.pool,aToken:network.aToken,controller:from,fundingDeadline:end,maturity,dailyLimit:daily.toString(),fundingCap:cap.toString(),cashReserve:reserve.toString(),recipients,graceSeconds:604800,lenderNetIncomeBps:yieldMode?10000-declared.botShareBps:10000};
   const termsHash=hash(settings);metadata={settings,termsHash,termsVersion:row.version};
-  const factory=new ContractFactory(artifact.abi,artifact.bytecode);
-  tx=await factory.getDeployTransaction(network.asset,network.aToken,network.pool,hash(project),termsHash,end,maturity,daily,cap,reserve,recipients);
+  const factory=new ContractFactory(selectedArtifact.abi,selectedArtifact.bytecode);
+  tx=await factory.getDeployTransaction(network.asset,network.aToken,network.pool,hash(project),termsHash,end,maturity,daily,cap,reserve,recipients,...(yieldMode?[declared.botShareBps]:[]));
  }else{
   const row=await round(env,project,input.vault),to=row.vault;metadata={vault:to,termsVersion:row.terms_version};
   let args=[],name=action,amount=0n;
@@ -80,8 +88,10 @@ export async function plan(env,input,principal){
   if(action==='spend'){amount=units(input.amount);if(!/^0x[a-fA-F0-9]{64}$/.test(input.intent||'')||/^0x0{64}$/.test(input.intent))throw failure(400,'A unique business invoice/task hash is required');args=[input.intent,address(input.recipient),amount];}
   if(action==='repay'){const p=input.principal==='0'?0n:units(input.principal),income=input.income==='0'?0n:units(input.income);if(p+income===0n)throw failure(400,'Positive repayment required');args=[p,income];amount=p+income;}
   if(action==='setExecutor'){if(typeof input.allowed!=='boolean')throw failure(400,'Explicit grant or revocation required');args=[address(input.executor),input.allowed];}
-  if(!['deposit','withdraw','start','spend','repay','allocate','recall','settle','claim','setExecutor'].includes(action))throw failure(400,'Unsupported action');
-  tx={to,data:vault.encodeFunctionData(name,args)};
+  if(!['deposit','withdraw','start','spend','repay','allocate','recall','settle','claim','setExecutor','harvest'].includes(action))throw failure(400,'Unsupported action');
+  const roundPolicy=JSON.parse(row.settings).policy;
+  if(action==='harvest'&&roundPolicy!==YIELD_POLICY)throw failure(400,'Harvest requires a yield-funded round');
+  tx={to,data:(roundPolicy===YIELD_POLICY?yieldABI:vault).encodeFunctionData(name,args)};
   if(['deposit','repay'].includes(action)){
    const allowance=await call(env,network.asset,'allowance',[from,to],'latest',erc20);
    if(allowance<amount)approval={from,to:network.asset,data:erc20.encodeFunctionData('approve',[to,amount]),value:'0x0',chainId:hex(network.chainId)};
@@ -92,7 +102,7 @@ export async function plan(env,input,principal){
  if(approval){const phase=Number(await call(env,tx.to,'phase'));if((action==='deposit'&&phase!==0)||(action==='repay'&&phase!==1))throw failure(409,'This round no longer accepts this action');}
 
  // Persist the exact transaction before the wallet sees it. No request can choose arbitrary calldata.
- const review=action==='deploy'?{controller:from,asset:'Base USDC',fundingCap:input.fundingCap,cashReserve:input.cashReserve,fundingCloses:new Date(input.fundingDeadline*1000).toISOString(),maturity:new Date(input.maturity*1000).toISOString(),payees:metadata.settings.recipients.join(', '),termsHash:metadata.termsHash,policy:metadata.settings.policy}:{vault:transaction.to,...Object.fromEntries(['amount','principal','income','recipient','intent','executor','allowed'].filter(k=>input[k]!==undefined).map(k=>[k,input[k]]))};
+ const review=action==='deploy'?{fundingModel:input.policy,botShareBps:metadata.settings.botShareBps??null,controller:from,asset:'Base USDC',fundingCap:input.fundingCap,cashReserve:input.cashReserve,fundingCloses:new Date(input.fundingDeadline*1000).toISOString(),maturity:new Date(input.maturity*1000).toISOString(),payees:metadata.settings.recipients.join(', '),termsHash:metadata.termsHash,policy:metadata.settings.policy}:{vault:transaction.to,...Object.fromEntries(['amount','principal','income','recipient','intent','executor','allowed'].filter(k=>input[k]!==undefined).map(k=>[k,input[k]]))};
  const record={transaction,approval,metadata,review};await db(env).prepare('INSERT INTO capital_intents(id,owner_id,project,action,payload,created_at) VALUES(?,?,?,?,?,?)').bind(id,principal,project,action,stringify(record),Date.now()).run();
  return {id,project,action,network,transaction,approval,metadata,review,warning:'Review the exact terms, chain, recipient and amount in your wallet. No server signer is used.'};
 }
@@ -111,7 +121,7 @@ export async function confirm(env,input,principal){
  const transactionHash=input.transactionHash.toLowerCase(),stmts=[];
  if(intent.action==='deploy'){
   const contract=address(receipt.contractAddress),code=await rpc(env,'eth_getCode',[contract,receipt.blockNumber]);
-  if(!matchesRuntime(code))throw failure(409,'Unexpected lending contract implementation');
+  if(!matchesRuntime(code,expected.metadata.settings.policy))throw failure(409,'Unexpected lending contract implementation');
   if(address(await call(env,contract,'controller',[],receipt.blockNumber))!==wallet(principal)||await call(env,contract,'termsHash',[],receipt.blockNumber)!==expected.metadata.termsHash)throw failure(409,'Deployment authority or terms mismatch');
   stmts.push(db(env).prepare('INSERT INTO capital_rounds(project,vault,terms_version,settings,deploy_tx,created_at) VALUES(?,?,?,?,?,?)').bind(intent.project,contract,expected.metadata.termsVersion,stringify(expected.metadata.settings),transactionHash,Date.now()));
  }
@@ -120,7 +130,8 @@ export async function confirm(env,input,principal){
  try{await db(env).batch(stmts);}catch(error){const won=await db(env).prepare('SELECT * FROM capital_receipts WHERE intent_id=?').bind(intent.id).first();if(won?.tx_hash===transactionHash)return {status:'confirmed',receipt:won};throw failure(409,'Transaction was already attributed or journal conflict');}
  return {status:'confirmed',receipt:record,contract:receipt.contractAddress||expected.transaction.to};
 }
-export function matchesRuntime(code){
+export function matchesRuntime(code,policy='fixed-round-net-income-v1'){
+ const artifact=deploymentArtifact(policy);
  if(typeof code!=='string'||code.length!==artifact.runtime.length)return false;
  let actual=code.toLowerCase(),expected=artifact.runtime.toLowerCase();
  for(const refs of Object.values(artifact.immutableReferences||{}))for(const {start,length} of refs){const begin=2+start*2,end=begin+length*2;actual=actual.slice(0,begin)+'0'.repeat(length*2)+actual.slice(end);expected=expected.slice(0,begin)+'0'.repeat(length*2)+expected.slice(end);}
@@ -149,13 +160,16 @@ export async function fundingDirectory(env) {
  const rows=(await db(env).prepare('SELECT project,vault,settings FROM capital_rounds ORDER BY created_at DESC').all()).results;
  const items={};
  for(const row of rows){
-  if(Object.hasOwn(items,row.project))continue;
+  let availability;
   try {
    await chain(env);
    const block=await rpc(env,'eth_blockNumber',[]);
    const [phase,deadline,principal,cap]=await Promise.all(['phase','fundingDeadline','principal','fundingCap'].map(name=>call(env,row.vault,name,[],block)));
-   items[row.project]={...fundingAvailability(phase,deadline,principal,cap,Math.floor(Date.now()/1000)),asOfBlock:block};
-  } catch {items[row.project]={status:'unknown',depositEnabled:false};}
+   availability={...fundingAvailability(phase,deadline,principal,cap,Math.floor(Date.now()/1000)),asOfBlock:block};
+  } catch {availability={status:'unknown',depositEnabled:false};}
+  const rounds=[...(items[row.project]?.rounds||[]),{vault:row.vault,policy:JSON.parse(row.settings).policy,...availability}];
+  const status=rounds.some(r=>r.status==='accepting')?'accepting':rounds.some(r=>r.status==='unknown')?'unknown':'not-accepting';
+  items[row.project]={status,depositEnabled:status==='accepting',rounds};
  }
  return {items,checkedAt:new Date().toISOString()};
 }
