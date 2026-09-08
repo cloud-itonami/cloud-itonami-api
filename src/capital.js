@@ -139,3 +139,23 @@ export async function registerTerms(env,input,principal){
  if(prior){if(prior.owner_id!==principal||prior.terms!==encoded)throw failure(409,'Terms version is immutable');return {status:'registered'};}
  await db(env).prepare('INSERT INTO public_funding_terms(project,version,terms,owner_id) VALUES(?,?,?,?)').bind(input.project,input.version,encoded,principal).run();return {status:'registered'};
 }
+
+// Public funding availability only; no positions, owners or intents are exposed.
+export function fundingAvailability(phase, deadline, principal, cap, now) {
+ const accepting=String(phase)==='0' && BigInt(deadline)>BigInt(now) && BigInt(principal)<BigInt(cap);
+ return {status:accepting?'accepting':'not-accepting',depositEnabled:accepting};
+}
+export async function fundingDirectory(env) {
+ const rows=(await db(env).prepare('SELECT project,vault,settings FROM capital_rounds ORDER BY created_at DESC').all()).results;
+ const items={};
+ for(const row of rows){
+  if(Object.hasOwn(items,row.project))continue;
+  try {
+   await chain(env);
+   const block=await rpc(env,'eth_blockNumber',[]);
+   const [phase,deadline,principal,cap]=await Promise.all(['phase','fundingDeadline','principal','fundingCap'].map(name=>call(env,row.vault,name,[],block)));
+   items[row.project]={...fundingAvailability(phase,deadline,principal,cap,Math.floor(Date.now()/1000)),asOfBlock:block};
+  } catch {items[row.project]={status:'unknown',depositEnabled:false};}
+ }
+ return {items,checkedAt:new Date().toISOString()};
+}
