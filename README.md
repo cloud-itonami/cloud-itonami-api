@@ -119,3 +119,10 @@ PublicNode endpoint: https://base.publicnode.com/
 Yield terms require an explicit `botShareBps` (1–10000). Harvest recalls all Aave assets and only allocates the new realized surplus above principal and already-retained lender yield. The agreed Bot share moves to BotYieldBudget; the remainder stays in the vault. Resupplying Aave is a separate operation. The Bot cannot call the budget directly, spend vault principal, re-harvest retained income or spend before surplus is realized. Grants, payee restrictions, invoice deduplication, maturity and daily caps still apply. Business receipts (`repay` with principal `0`) are retained for lenders. Unused Bot budget returns on settlement.
 
 This is an accounting separation, not principal insurance: USDC/Aave loss and liquidity risks remain. Impairment blocks harvesting and Bot spending; settlement distributes recovered assets, including unused budget. Gas must come from the executing wallet, not an assumed future yield. The current strategy has no leverage or automatic scheduler. Contract tests and local-chain integration do not constitute an independent audit or a mainnet funding launch.
+
+## Safe Bot operating budgets
+
+[Bot payment authority](docs/bot-payment-authority.md) describes the tested,
+finite `BotPaymentModule` and activation requirements. It is inactive until the
+owner enables a deployed module with explicit terms. The production hosted Bot
+signer is not connected by this contract addition.
