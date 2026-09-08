@@ -8,8 +8,9 @@ with **no arguments** and receives one immutable YieldVault. It can start the
 round and use that vault's bounded executor operations without further owner
 signatures. Investors only approve USDC, deposit, withdraw, or claim.
 
-This contract is not yet deployed or integrated into the production capital
-registry. A hosted operator signer is also not yet connected. Do not expose a
+The API can prepare and confirm the initial grant, prepare the operator launch,
+and register its verified child after confirmation. The contract is not yet
+deployed on mainnet. A hosted operator signer is also not yet connected. Do not expose a
 launcher address as a deposit address: only its verified child YieldVault may
 accept deposits, after registration and confirmation.
 
