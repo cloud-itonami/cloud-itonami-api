@@ -5,8 +5,9 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
-    "BASE_RPC": "https://mainnet.base.org",
-    "BASE_RPC_FALLBACK": "https://base.drpc.org"
+    "BASE_RPC": "https://base-rpc.publicnode.com",
+    "BASE_RPC_FALLBACK": "https://base.drpc.org",
+    "BASE_RPC_SECONDARY": "https://mainnet.base.org"
   },
   "d1_databases": [
     {
