@@ -185,7 +185,7 @@ export function matchesRuntime(code,policy='fixed-round-net-income-v1'){
 export async function readIntent(env,id,principal){
  if(!principal)throw failure(401,'Verified session required');
  const row=await db(env).prepare('SELECT * FROM capital_intents WHERE id=? AND owner_id=?').bind(id,principal).first();if(!row)throw failure(404,'Transaction intent not found');
- return {id:row.id,project:row.project,action:row.action,network,...JSON.parse(row.payload)};
+ return {id:row.id,project:row.project,action:row.action,requiresOperatorSigner:['operator-launch','operator-start'].includes(row.action),network,...JSON.parse(row.payload)};
 }
 
 export async function registerTerms(env,input,principal){
