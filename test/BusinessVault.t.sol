@@ -49,6 +49,7 @@ contract BusinessVaultTest {
  vm.expectRevert();v.allocate(101e6);
  }
  function testDefaultGraceAndProRataLoss() public {deposit(alice,100e6);operate();vm.prank(bot);v.spend(bytes32(uint256(1)),vendor,90e6);vm.warp(100000);vm.expectRevert();v.settle();vm.warp(100000+7 days);v.settle();require(v.writtenOff()==90e6);vm.prank(alice);v.claim();require(t.balanceOf(alice)==910e6);}
+ function testSettlementRecallsAccruedInterestAtomically() public {deposit(alice,100e6);operate();v.allocate(90e6);p.yieldTo(address(v),1e6);vm.warp(100000);v.settle();require(v.settlementAssets()==101e6);require(v.aToken().balanceOf(address(v))==0);}
  function testIlliquidityCannotBeReportedAsDistribution() public {deposit(alice,100e6);operate();v.allocate(90e6);p.freeze(true);vm.warp(100000);vm.expectRevert();v.recall(type(uint256).max);vm.expectRevert();v.settle();require(uint(v.phase())==1);p.freeze(false);v.recall(type(uint256).max);v.settle();}
  function testNoCrossProjectSpend() public {deposit(alice,100e6);operate();vm.prank(address(123));vm.expectRevert();v.setExecutor(address(123),true);vm.prank(address(123));vm.expectRevert();v.allocate(1);}
  function testFuzzProRataConservation(uint64 a,uint64 b,uint64 income) public {

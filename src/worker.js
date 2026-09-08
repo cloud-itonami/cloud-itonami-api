@@ -7,6 +7,7 @@ export default {async fetch(request,env){try{
  if(request.method==='GET')return json(await snapshot(env,url.searchParams.get('project'),url.searchParams.get('vault'),principal));
  if(request.method!=='POST')throw failure(405,'Method not allowed');if(!principal)throw failure(401,'Verified session required');
  if(Number(request.headers.get('content-length')||0)>16000)throw failure(413,'Request too large');const raw=await request.text();if(raw.length>16000)throw failure(413,'Request too large');let input;try{input=JSON.parse(raw);}catch{throw failure(400,'Invalid JSON');}
+ if(!input||typeof input!=='object'||Array.isArray(input))throw failure(400,'JSON object required');
  if(input.action==='register-terms'){if(request.headers.get('x-itonami-operation')!=='registered-org-terms')throw failure(403,'Organization registration authority required');return json(await registerTerms(env,input,principal));}
  return json(input.action==='confirm'?await confirm(env,input,principal):await plan(env,input,principal));
  }catch(error){return json({error:error.status?error.message:'Capital service unavailable'},error.status||503);}}};

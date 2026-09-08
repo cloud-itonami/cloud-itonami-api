@@ -22,6 +22,7 @@ export function wallet(principal){const match=/^did:pkh:eip155:(1|8453):(0x[a-fA
 async function terms(env,project,version){const row=await db(env).prepare('SELECT * FROM public_funding_terms WHERE project=? AND version=?').bind(project,version).first();if(!row)throw failure(404,'Registered terms not found');return row;}
 async function round(env,project,contract){const row=await db(env).prepare('SELECT * FROM capital_rounds WHERE project=? AND vault=?').bind(project,address(contract)).first();if(!row)throw failure(404,'Verified lending round not found');return row;}
 export async function snapshot(env,project,contract,principal){
+ if(typeof project!=='string'||!/^[-a-zA-Z0-9_.]+\/[-a-zA-Z0-9_.]+$/.test(project)||project.length>201)throw failure(400,'Use org/repo');
  await chain(env);
  const rows=(await db(env).prepare('SELECT project,vault,terms_version,created_at,settings FROM capital_rounds WHERE project=? ORDER BY created_at DESC').bind(project).all()).results;
  const selected=contract?rows.find(r=>r.vault===address(contract)):rows[0];if(!selected)return {project,network,rounds:[],status:'no-vault',depositEnabled:false};

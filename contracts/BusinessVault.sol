@@ -106,6 +106,7 @@ contract BusinessVault {
  /// Aave liquidity must be recalled first. No caller may send it elsewhere.
  function settle() external lock {
   require(phase!=Phase.Settled&&block.timestamp>=maturity,"maturity");
+  if(aToken.balanceOf(address(this))>0) pool.withdraw(address(asset),type(uint256).max,address(this));
   require(aToken.balanceOf(address(this))==0,"recall strategy first");
   require(debt==0||block.timestamp>=maturity+7 days,"repayment grace");
   writtenOff=debt;debt=0;settlementAssets=asset.balanceOf(address(this));phase=Phase.Settled;

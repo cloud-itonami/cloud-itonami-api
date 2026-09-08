@@ -99,3 +99,7 @@ Aave liquidity: https://www.aave.com/help/supplying/withdraw-tokens
 Implemented and locally exercised; no independent contract audit, public borrower
 terms, deployed lending round, or live financial settlement is implied by the API
 Worker deployment. Do not represent this version as audited or risk-free.
+
+Settlement recalls the entire Aave position in the same transaction, so accrued
+interest or donated receipt-token dust cannot leave a separate recall/settle gap.
+If Aave cannot supply that liquidity, settlement reverts and remains uncompleted.
