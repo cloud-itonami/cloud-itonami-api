@@ -1,6 +1,7 @@
 import {safeDeployment,safeABI,safeEnvelope,safeExecutionSucceeded} from './safe.js';
 import {Interface,ContractFactory,keccak256,toUtf8Bytes} from 'ethers';
 import artifact from './vault-artifact.json' with {type:'json'};
+import launcherArtifact from './launcher-artifact.json' with {type:'json'};
 import yieldArtifact from './yield-vault-artifact.json' with {type:'json'};
 export const YIELD_POLICY='yield-budget-v1';
 const yieldABI=new Interface(yieldArtifact.abi);
@@ -52,7 +53,7 @@ export async function snapshot(env,project,contract,principal,account=null){
  if(typeof project!=='string'||!/^[-a-zA-Z0-9_.]+\/[-a-zA-Z0-9_.]+$/.test(project)||project.length>201)throw failure(400,'Use org/repo');
  const acting=account?(await safeAccount(env,account,principal)).address:null;
  const rows=(await db(env).prepare('SELECT project,vault,terms_version,created_at,settings FROM capital_rounds WHERE project=? ORDER BY created_at DESC').bind(project).all()).results;
- const selected=contract?rows.find(r=>r.vault===address(contract)):rows[0];if(contract&&!selected)throw failure(404,'Verified lending round not found');if(!selected)return {project,network,rounds:[],status:'no-vault',depositEnabled:false};
+ const selected=contract?rows.find(r=>r.vault===address(contract)):rows[0];if(contract&&!selected)throw failure(404,'Verified lending round not found');if(!selected){const grant=principal?await db(env).prepare('SELECT launcher,executor FROM capital_launchers WHERE project=? AND owner_id=? ORDER BY created_at DESC LIMIT 1').bind(project,principal).first():null;return {project,network,rounds:[],status:'no-vault',depositEnabled:false,operatorGrant:grant||null};}
  await chain(env);
  const block=await rpc(env,'eth_blockNumber',[]),to=selected.vault,result={};
  await Promise.all(['phase','principal','debt','repaid','businessIncome','writtenOff','settlementAssets','distributed','fundingDeadline','maturity','dailyLimit','cashReserve','controller','termsHash'].map(async name=>{result[name]=String(await call(env,to,name,[],block));}));
@@ -152,13 +153,27 @@ export async function confirm(env,input,principal){
   if(address(await call(env,contract,'controller',[],receipt.blockNumber))!==wallet(principal)||await call(env,contract,'termsHash',[],receipt.blockNumber)!==expected.metadata.termsHash)throw failure(409,'Deployment authority or terms mismatch');
   stmts.push(db(env).prepare('INSERT INTO capital_rounds(project,vault,terms_version,settings,deploy_tx,created_at) VALUES(?,?,?,?,?,?)').bind(intent.project,contract,expected.metadata.termsVersion,stringify(expected.metadata.settings),transactionHash,Date.now()));
  }
+ if(intent.action==='deploy-launcher'){
+  const contract=address(receipt.contractAddress),code=await rpc(env,'eth_getCode',[contract,receipt.blockNumber]),abi=new Interface(launcherArtifact.abi);
+  if(!matchesRuntime(code,'bot-funding-launcher-v1')||address(await call(env,contract,'owner',[],receipt.blockNumber,abi))!==wallet(principal)||address(await call(env,contract,'bot',[],receipt.blockNumber,abi))!==expected.metadata.executor)throw failure(409,'Unverified operator launch grant');
+  stmts.push(db(env).prepare('INSERT INTO capital_launchers(project,launcher,owner_id,executor,settings,terms_version,terms_hash,deploy_tx,created_at) VALUES(?,?,?,?,?,?,?,?,?)').bind(intent.project,contract,principal,expected.metadata.executor,stringify(expected.metadata.settings),expected.metadata.termsVersion,expected.metadata.termsHash,transactionHash,Date.now()));
+ }
+ if(intent.action==='operator-launch'){
+  const grant=expected.metadata.launcher,abi=new Interface(launcherArtifact.abi);
+  const events=receipt.logs.filter(l=>l.address?.toLowerCase()===grant).map(l=>{try{return abi.parseLog(l);}catch{return null;}}).filter(e=>e?.name==='RoundCreated');
+  if(events.length!==1)throw failure(409,'Missing unique operator round creation event');
+  const contract=address(events[0].args.vault),code=await rpc(env,'eth_getCode',[contract,receipt.blockNumber]);
+  if(!matchesRuntime(await rpc(env,'eth_getCode',[grant,receipt.blockNumber]),'bot-funding-launcher-v1')||!matchesRuntime(code,YIELD_POLICY)||address(await call(env,grant,'vault',[],receipt.blockNumber,abi))!==contract||address(await call(env,contract,'controller',[],receipt.blockNumber))!==grant||await call(env,contract,'termsHash',[],receipt.blockNumber)!==expected.metadata.termsHash)throw failure(409,'Unverified operator-created round');
+  stmts.push(db(env).prepare('INSERT INTO capital_rounds(project,vault,terms_version,settings,deploy_tx,created_at) VALUES(?,?,?,?,?,?)').bind(intent.project,contract,expected.metadata.termsVersion,stringify({...expected.metadata.settings,controller:grant,operatorExecutor:expected.metadata.executor}),transactionHash,Date.now()));
+  expected.metadata.createdVault=contract;
+ }
  const record={chain_id:network.chainId,tx_hash:transactionHash,intent_id:intent.id,project:intent.project,action:intent.action,block_number:Number(BigInt(receipt.blockNumber)),block_hash:receipt.blockHash};
  stmts.push(db(env).prepare('INSERT INTO capital_receipts(chain_id,tx_hash,intent_id,project,action,block_number,block_hash) VALUES(?,?,?,?,?,?,?)').bind(...Object.values(record)));
  try{await db(env).batch(stmts);}catch(error){const won=await db(env).prepare('SELECT * FROM capital_receipts WHERE intent_id=?').bind(intent.id).first();if(won?.tx_hash===transactionHash)return {status:'confirmed',receipt:won};throw failure(409,'Transaction was already attributed or journal conflict');}
- return {status:'confirmed',receipt:record,contract:receipt.contractAddress||expected.metadata.capitalTransaction?.to||expected.transaction.to};
+ return {status:'confirmed',receipt:record,contract:expected.metadata.createdVault||receipt.contractAddress||expected.metadata.capitalTransaction?.to||expected.transaction.to};
 }
 export function matchesRuntime(code,policy='fixed-round-net-income-v1'){
- const artifact=deploymentArtifact(policy);
+ const artifact=policy==='bot-funding-launcher-v1'?launcherArtifact:deploymentArtifact(policy);
  if(typeof code!=='string'||code.length!==artifact.runtime.length)return false;
  let actual=code.toLowerCase(),expected=artifact.runtime.toLowerCase();
  for(const refs of Object.values(artifact.immutableReferences||{}))for(const {start,length} of refs){const begin=2+start*2,end=begin+length*2;actual=actual.slice(0,begin)+'0'.repeat(length*2)+actual.slice(end);expected=expected.slice(0,begin)+'0'.repeat(length*2)+expected.slice(end);}

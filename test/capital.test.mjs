@@ -1,3 +1,4 @@
+import {prepareLauncher,prepareOperatorLaunch} from '../src/launcher.js';
 import {safeDeployment,safeEnvelope,safeABI,safeExecutionSucceeded} from '../src/safe.js';
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import {spawn} from 'node:child_process';import {DatabaseSync} from 'node:sqlite';
 import {JsonRpcProvider,ContractFactory,Contract,zeroPadValue,keccak256,toUtf8Bytes} from 'ethers';
@@ -83,6 +84,19 @@ test('actual EVM deployment, signed deposits, bounded Bot spending, DeFi, repaym
   await submit(await plan(env,{project:org,vault:sv,action:'withdraw',amount:'10',safe},principal),owner,principal);
   assert.equal(await token.balanceOf(safe),10000000n);
   assert.equal((await fundingDirectory(env,principal,safe)).items[org].lending,false);
+
+  const grantPlan=await prepareLauncher(env,{...yinput,executor:vendor.address,fundingDeadline:now+6000,maturity:now+7200},principal);
+  const [grant]=await submit(grantPlan,owner,principal);
+  await assert.rejects(prepareOperatorLaunch(env,{launcher:grant.contract,project:org},lenderPrincipal),e=>e.status===403);
+  const launchPlan=await prepareOperatorLaunch(env,{launcher:grant.contract,project:org},principal);
+  assert.equal(launchPlan.transaction.from,vendor.address.toLowerCase());
+  const [operatorRound]=await submit(launchPlan,vendor,principal);
+  assert.notEqual(operatorRound.contract,grant.contract);
+  assert.equal((await snapshot(env,org,operatorRound.contract,lenderPrincipal)).balances.controller.toLowerCase(),grant.contract);
+  assert.equal((await fundingDirectory(env,principal)).items[org].status,'accepting');
+  await assert.rejects(prepareOperatorLaunch(env,{launcher:grant.contract,project:org},principal),e=>e.status===409);
+  await submit(await plan(env,{project:org,vault:operatorRound.contract,action:'deposit',amount:'1'},lenderPrincipal),lender,lenderPrincipal);
+  assert.equal((await snapshot(env,org,operatorRound.contract,lenderPrincipal)).balances.position,'1000000');
 
  }finally{globalThis.fetch=originalFetch;provider.destroy();process.kill();}
 });
