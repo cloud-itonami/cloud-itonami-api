@@ -9,8 +9,10 @@ round and use that vault's bounded executor operations without further owner
 signatures. Investors only approve USDC, deposit, withdraw, or claim.
 
 The API can prepare and confirm the initial grant, prepare the operator launch,
-and register its verified child after confirmation. The contract is not yet
-deployed on mainnet. A hosted operator signer is also not yet connected. Do not expose a
+and register its verified child after confirmation. The pilot grant was deployed on Base at
+`0x2a2c39d240c10f19a7f2c1971a1ba560d00ab413` in transaction
+`0x7ff67c4934dee18a344c2ad51f93da92d356e33bbff4586c8b8e2ee6a20a04cf`
+and confirmed in the production journal. A hosted operator signer is not yet connected. Do not expose a
 launcher address as a deposit address: only its verified child YieldVault may
 accept deposits, after registration and confirmation.
 
@@ -47,3 +49,18 @@ forge test covers operator-only creation, single-round limits, expired/revoked
 grants, investor exit after revocation, and the complete Bot-created yield round:
 deposit -> Bot start -> Aave allocation -> realized yield -> Bot payment ->
 settlement and lender claim. These are local simulated assets, not live funding.
+
+## Pilot preflight
+
+Run `node scripts/operator-launch-preflight.mjs` to read the pilot grant and
+prepare its unsigned `launch()` request. It checks chain, runtime, owner,
+executor, project, revocation, existing child and deadline at an observed block.
+It simulates creation, estimates execution gas, and reads the executor ETH
+balance. It never reads a key, signs, broadcasts, or enables deposits.
+
+The 2026-09-08 observation at block `0x30aacb4` passed simulation but found
+zero ETH on the executor. The execution gas estimate was 2,349,721; this is not
+a fee guarantee and excludes Base L1 data fees. Refresh before any execution.
+The candidate child address is not an active deposit destination. Production
+requires an independently operated signer and a confirmed, indexed RoundCreated
+receipt before enabling investor deposits.
