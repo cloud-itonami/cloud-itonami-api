@@ -69,6 +69,11 @@ specified block, not inferred from stored receipts or advertised APR.
 
 `npm ci --ignore-scripts && npm run build && npm test && npm run check`
 
+[Operator quickstart](docs/operator-quickstart.md) walks this from an unfamiliar
+checkout with the observed output of each step, including the Foundry `PATH`
+requirement, why `npm run build` leaves two artifacts modified without changing
+any deployed bytecode, and the read-only Base grant preflight.
+
 Foundry contract tests cover actual transfers, Aave-style supply/withdraw,
 repayment, profit/loss distribution, caps, revoked permissions, replay,
 illiquidity and 256 randomized pro-rata cases. The Node test launches isolated
